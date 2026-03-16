@@ -1,32 +1,39 @@
+-- Central state bag for the movement system.
+-- MovementClient reads and writes these fields each frame.
+-- Call reset() on respawn to zero everything out.
+
 local MovementState = {}
 
 export type MoveState = {
 	sprinting: boolean,
 	crouching: boolean,
 	sliding: boolean,
-	slideEnd: number,
-	lastSlideTime: number,
+	slideEnd: number,              -- timestamp when the current slide expires
+	lastSlideTime: number,         -- last slide start, used for cooldown checks
 	slideDirection: (Vector3 | nil),
 	sprintStamina: number,
-	lastStaminaUse: number,
+	lastStaminaUse: number,        -- tracks regen delay
 	tacSprinting: boolean,
 	tacSprintStamina: number,
-	lastTacSprintEnd: number,
+	lastTacSprintEnd: number,      -- tracks tac sprint cooldown and regen delay
 	jumping: boolean,
 	airborne: boolean,
 	airborneStartTime: number,
 	lastLandTime: number,
-	landingPenalty: number,
-	fallStartY: number,
-	slideVelocity: number,
-	slideCancelTime: number,
+	landingPenalty: number,        -- 0..1 speed multiplier that decays after landing
+	fallStartY: number,           -- Y position when the player left the ground
+	slideVelocity: number,        -- entry speed of the current slide
+	slideCancelTime: number,      -- set on cancel, drives the brief speed boost window
 }
 
 export type MovementConfig = {
+	-- core speeds
 	WalkSpeed: number,
 	SprintSpeed: number,
 	CrouchSpeed: number,
 	SlideSpeed: number,
+
+	-- slide tuning
 	SlideDuration: number?,
 	SlideMaxDuration: number?,
 	SlideCooldown: number?,
@@ -34,27 +41,39 @@ export type MovementConfig = {
 	SlideSpeedMax: number?,
 	SlideCancelBoostDuration: number?,
 	SlideCancelBoostMul: number?,
+
+	-- aiming
 	AimSpeedMul: number?,
+
+	-- sprint stamina
 	SprintStaminaMax: number?,
 	SprintDrainRate: number?,
 	SprintRegenRate: number?,
 	StaminaRegenDelay: number?,
+
+	-- tac sprint stamina (separate pool)
 	TacSprintSpeed: number?,
 	TacSprintDrainRate: number?,
 	TacSprintStaminaMax: number?,
 	TacSprintRegenRate: number?,
 	TacSprintRegenDelay: number?,
 	TacSprintCooldown: number?,
+
+	-- air movement
 	AirSpeedMul: number?,
 	AirControlFactor: number?,
 	AirAccelRate: number?,
+
+	-- landing penalties
 	LandingPenaltyLight: number?,
 	LandingPenaltyHeavy: number?,
 	LandingPenaltyDecay: number?,
 	LandingHeightThreshold: number?,
+
 	JumpHeight: number?,
 }
 
+-- Creates a fresh state with stamina pools filled to max.
 function MovementState.create(defaultMovement: MovementConfig)
 	local moveState: MoveState = {
 		sprinting = false,
@@ -77,6 +96,7 @@ function MovementState.create(defaultMovement: MovementConfig)
 		slideVelocity = 0,
 		slideCancelTime = 0,
 	}
+
 	return {
 		moveState = moveState,
 		reset = function()
