@@ -1,3 +1,9 @@
+-- Client-side movement state machine.
+-- Handles sprinting, tactical sprinting, crouching, sliding, jumping, air control,
+-- landing penalties, and stamina for all of the above.
+-- Built as a factory: call create() with a movement config resolver, then call the
+-- returned constructor with a context getter to wire it into your character controller.
+
 local MovementClient = {}
 
 export type MovementContext = {
@@ -18,6 +24,9 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 	return function(getCtx: () -> MovementContext)
 		local function applyCurrentSpeed() end
 
+		-- Resolves the final walk speed from the current state stack.
+		-- Priority: sliding (locked to 0) > crouching > aiming > tac sprint > sprint > walk.
+		-- Multipliers for firing, airborne, landing penalty, and slide-cancel boost layer on top.
 		local function getCurrentWalkSpeed(): number
 			local ctx = getCtx()
 			local state = ctx.state
@@ -47,6 +56,8 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 			if state.landingPenalty > 0 then
 				speed = speed * (1 - state.landingPenalty)
 			end
+
+			-- brief speed bump after canceling a slide mid-sprint
 			if state.slideCancelTime > 0 then
 				local elapsed = os.clock() - state.slideCancelTime
 				local boostDuration = mov.SlideCancelBoostDuration or 0.15
@@ -77,6 +88,7 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 			end
 		end
 
+		-- Tac sprint is a faster sprint variant with its own stamina pool and cooldown.
 		local function startTacSprint()
 			local c = getCtx()
 			local s = c.state
@@ -97,6 +109,7 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 			applyCurrentSpeed()
 		end
 
+		-- Interrupt a slide early. Grants a brief speed boost and returns to sprint.
 		local function cancelSlide()
 			local c = getCtx()
 			local s = c.state
@@ -110,6 +123,8 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 			applyCurrentSpeed()
 		end
 
+		-- Crouch, or slide if currently sprinting and the cooldown has passed.
+		-- Slide duration scales with entry speed so tac-sprint slides go further.
 		local function startCrouch()
 			local c = getCtx()
 			local s = c.state
@@ -127,6 +142,7 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 				s.crouching = true
 				s.tacSprinting = false
 
+				-- longer slide if entering from tac sprint
 				local entrySpeed = wasTacSprinting and (mov.TacSprintSpeed or mov.SprintSpeed) or mov.SprintSpeed
 				local maxSpeed = mov.TacSprintSpeed or mov.SprintSpeed
 				local speedRatio = math.clamp(entrySpeed / maxSpeed, 0, 1)
@@ -134,6 +150,7 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 				local maxDur = mov.SlideMaxDuration or mov.SlideDuration or 1
 				local duration = minDur + (maxDur - minDur) * speedRatio
 
+				-- inherit some of the player's current horizontal velocity for momentum
 				local baseSlideSpeed = mov.SlideSpeed * (wasTacSprinting and 1.15 or 1)
 				local currentVel = c.root and c.root.AssemblyLinearVelocity or Vector3.zero
 				local horizontalSpeed = Vector3.new(currentVel.X, 0, currentVel.Z).Magnitude
@@ -143,6 +160,7 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 				s.lastSlideTime = os.clock()
 				s.slideCancelTime = 0
 
+				-- slide follows the camera's flat forward, not the character's facing
 				local lookFlat = (c.camera and c.camera.CFrame.LookVector * Vector3.new(1, 0, 1)) or Vector3.new(0, 0, -1)
 				s.slideDirection = lookFlat.Magnitude > 0.01 and lookFlat.Unit or Vector3.new(0, 0, -1)
 				s.sprintStamina = math.max(0, s.sprintStamina - slideCost)
@@ -156,6 +174,7 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 				return
 			end
 
+			-- no slide, plain crouch
 			s.crouching = true
 			s.sprinting = false
 			s.tacSprinting = false
@@ -175,6 +194,8 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 			applyCurrentSpeed()
 		end
 
+		-- Returns the slide direction and current speed, or nil if not sliding.
+		-- Speed decelerates on a power curve toward crouch speed.
 		local function getSlideVelocity(): { Vector3, number }?
 			local c = getCtx()
 			local s = c.state
@@ -190,6 +211,7 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 			return { s.slideDirection, speed }
 		end
 
+		-- End the slide naturally when duration expires, dropping into crouch.
 		local function updateSlideEnd()
 			local c = getCtx()
 			local s = c.state
@@ -222,16 +244,18 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 			hum:ChangeState(Enum.HumanoidStateType.Jumping)
 		end
 
+		-- Tracks transitions between grounded and airborne.
+		-- On landing, assigns a speed penalty scaled by fall distance.
 		local function updateAirborneState()
 			local c = getCtx()
 			local s = c.state
 			local hum = c.humanoid
 			if not hum then return end
 			local isOnGround = hum.FloorMaterial ~= Enum.Material.Air
+
 			if s.airborne and isOnGround then
 				local mov = getActiveMovement(c)
-				local fallDist = s.fallStartY - (c.root and c.root.Position.Y or 0)
-				fallDist = math.max(0, fallDist)
+				local fallDist = math.max(0, s.fallStartY - (c.root and c.root.Position.Y or 0))
 				local heavyThreshold = mov.LandingHeightThreshold or 10
 				if fallDist > 2 then
 					if fallDist > heavyThreshold then
@@ -251,6 +275,7 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 			end
 		end
 
+		-- Steers horizontal velocity while airborne so the player has partial directional control.
 		local function updateAirControl(dt: number)
 			local c = getCtx()
 			local s = c.state
@@ -273,6 +298,7 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 			c.root.AssemblyLinearVelocity = Vector3.new(newHorizontal.X, currentVel.Y, newHorizontal.Z)
 		end
 
+		-- Landing penalty fades over time so movement recovers smoothly after a hard drop.
 		local function updateLandingPenalty(dt: number)
 			local c = getCtx()
 			local s = c.state
@@ -283,10 +309,14 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 			end
 		end
 
+		-- Drains and regenerates both sprint and tac-sprint stamina pools.
+		-- Each pool has its own drain rate, regen rate, and regen delay.
 		local function updateStamina(dt: number)
 			local c = getCtx()
 			local s = c.state
 			local mov = getActiveMovement(c)
+
+			-- tac sprint stamina
 			if s.tacSprinting and c.alive then
 				local drain = (mov.TacSprintDrainRate or 80) * dt
 				s.tacSprintStamina = math.max(0, s.tacSprintStamina - drain)
@@ -298,6 +328,8 @@ local function create(getActiveMovement: (ctx: MovementContext) -> any)
 					s.tacSprintStamina = math.min(max, s.tacSprintStamina + (mov.TacSprintRegenRate or 15) * dt)
 				end
 			end
+
+			-- regular sprint stamina
 			if s.sprinting and c.alive then
 				local drain = (mov.SprintDrainRate or 35) * dt
 				s.sprintStamina = math.max(0, s.sprintStamina - drain)
